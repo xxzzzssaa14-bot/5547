@@ -74,6 +74,7 @@ async function initData() {
     if (localQueue) syncQueue = localQueue;
     
     if (isOnline) {
+        await processQueue();
         await syncData();
     } else {
         updateNetworkStatus('offline');
@@ -85,19 +86,78 @@ async function saveDataLocally() {
     data.lastUpdated = Date.now();
     await setLocalData('kareemData', data);
     if (isOnline) {
-        addToQueue('sync');
-        processQueue();
-    } else {
-        addToQueue('sync');
+        await processQueue();
     }
 }
 
-function addToQueue(action) {
-    syncQueue.push({ action, timestamp: Date.now() });
+function addToQueue(action, collection, item) {
+    syncQueue.push({ 
+        id: Date.now() + Math.random(), 
+        action: action, 
+        collection: collection, 
+        item: JSON.parse(JSON.stringify(item)), 
+        timestamp: Date.now() 
+    });
     setLocalData('syncQueue', syncQueue);
 }
 
+async function processQueue() {
+    if (!isOnline || syncQueue.length === 0) return;
+    updateNetworkStatus('syncing');
+    try {
+        const docRef = doc(db, "data", "main");
+        const docSnap = await getDoc(docRef);
+        let serverData = { inventory1: [], inventory2: [], customers: [], transactions: [] };
+        
+        if (docSnap.exists()) {
+            serverData = docSnap.data();
+        }
+
+        for (const op of syncQueue) {
+            if (!serverData[op.collection]) serverData[op.collection] = [];
+            
+            if (op.action === 'add') {
+                const exists = serverData[op.collection].find(x => x.id === op.item.id);
+                if (!exists) {
+                    serverData[op.collection].push(op.item);
+                } else {
+                     const idx = serverData[op.collection].findIndex(x => x.id === op.item.id);
+                     if(op.item.lastUpdated > serverData[op.collection][idx].lastUpdated) {
+                          serverData[op.collection][idx] = op.item;
+                     }
+                }
+            } else if (op.action === 'edit') {
+                const idx = serverData[op.collection].findIndex(x => x.id === op.item.id);
+                if (idx > -1) {
+                    if(!serverData[op.collection][idx].lastUpdated || op.item.lastUpdated > serverData[op.collection][idx].lastUpdated) {
+                        serverData[op.collection][idx] = op.item;
+                    }
+                } else {
+                    serverData[op.collection].push(op.item);
+                }
+            } else if (op.action === 'delete') {
+                serverData[op.collection] = serverData[op.collection].filter(x => x.id !== op.item.id);
+            }
+        }
+
+        await setDoc(docRef, serverData);
+        syncQueue = [];
+        await setLocalData('syncQueue', syncQueue);
+        
+        mergeData(serverData);
+        updateNetworkStatus('online');
+        renderUI();
+    } catch (e) {
+        console.error(e);
+        updateNetworkStatus('offline');
+    }
+}
+
 async function syncData() {
+    if (syncQueue.length > 0) {
+        await processQueue();
+        return;
+    }
     updateNetworkStatus('syncing');
     try {
         const docRef = doc(db, "data", "main");
@@ -108,9 +168,6 @@ async function syncData() {
             mergeData(serverData);
         }
         
-        await setDoc(docRef, data);
-        syncQueue = [];
-        await setLocalData('syncQueue', syncQueue);
         updateNetworkStatus('online');
         renderUI();
     } catch (e) {
@@ -138,11 +195,6 @@ function mergeData(serverData) {
     setLocalData('kareemData', data);
 }
 
-async function processQueue() {
-    if (!isOnline || syncQueue.length === 0) return;
-    await syncData();
-}
-
 function updateNetworkStatus(status) {
     const el = document.getElementById('network-status');
     el.className = `network-status ${status}`;
@@ -155,7 +207,9 @@ window.addEventListener('online', () => { isOnline = true; processQueue(); });
 window.addEventListener('offline', () => { isOnline = false; updateNetworkStatus('offline'); });
 
 if ('serviceWorker' in navigator) {
-    navigator.serviceWorker.register('sw.js');
+    window.addEventListener('load', () => {
+        navigator.serviceWorker.register('sw.js');
+    });
 }
 
 let deferredPrompt;
@@ -167,8 +221,10 @@ window.addEventListener('beforeinstallprompt', (e) => {
 
 window.installApp = function() {
     document.getElementById('install-prompt').style.display = 'none';
-    deferredPrompt.prompt();
-    deferredPrompt = null;
+    if(deferredPrompt) {
+        deferredPrompt.prompt();
+        deferredPrompt = null;
+    }
 };
 
 window.closeInstallPrompt = function() {
@@ -237,9 +293,10 @@ window.saveItem = async function() {
     }
 
     const newItem = { id: Date.now(), name, price, qty, lastUpdated: Date.now() };
+    const collection = currentInventory === 1 ? 'inventory1' : 'inventory2';
     
-    if (currentInventory === 1) data.inventory1.push(newItem);
-    else data.inventory2.push(newItem);
+    data[collection].push(newItem);
+    addToQueue('add', collection, newItem);
 
     await saveDataLocally();
     window.closeModal('addItemModal');
@@ -282,7 +339,8 @@ window.saveEditItem = async function() {
         alert("يرجى تعبئة جميع الحقول بشكل صحيح"); return;
     }
 
-    const items = invNum === 1 ? data.inventory1 : data.inventory2;
+    const collection = invNum === 1 ? 'inventory1' : 'inventory2';
+    const items = data[collection];
     const itemIndex = items.findIndex(i => i.id === id);
 
     if (itemIndex > -1) {
@@ -291,6 +349,7 @@ window.saveEditItem = async function() {
         items[itemIndex].qty = qty;
         items[itemIndex].lastUpdated = Date.now();
         
+        addToQueue('edit', collection, items[itemIndex]);
         await saveDataLocally();
         window.closeModal('editItemModal');
         window.searchInventory();
@@ -299,12 +358,9 @@ window.saveEditItem = async function() {
 
 window.deleteItem = async function(id, invNum) {
     if(confirm("هل أنت متأكد من حذف هذه المادة؟")) {
-        const items = invNum === 1 ? data.inventory1 : data.inventory2;
-        const itemIndex = items.findIndex(i => i.id === id);
-        if (itemIndex > -1) {
-            items[itemIndex].deleted = true;
-            items[itemIndex].lastUpdated = Date.now();
-        }
+        const collection = invNum === 1 ? 'inventory1' : 'inventory2';
+        data[collection] = data[collection].filter(i => i.id !== id);
+        addToQueue('delete', collection, { id: id });
         await saveDataLocally();
         window.searchInventory();
     }
@@ -313,7 +369,7 @@ window.deleteItem = async function(id, invNum) {
 window.renderInventory = function(searchQuery = '') {
     const list = document.getElementById('inventory-list');
     list.innerHTML = '';
-    let items = currentInventory === 1 ? data.inventory1.filter(i => !i.deleted) : data.inventory2.filter(i => !i.deleted);
+    let items = currentInventory === 1 ? data.inventory1 : data.inventory2;
 
     if (searchQuery) {
         items = items.filter(item => item.name.toLowerCase().startsWith(searchQuery));
@@ -361,6 +417,8 @@ window.saveCustomer = async function() {
     };
 
     data.customers.push(newCustomer);
+    addToQueue('add', 'customers', newCustomer);
+
     await saveDataLocally();
     window.closeModal('addCustomerModal');
     
@@ -394,6 +452,8 @@ window.saveEditCustomer = async function() {
         data.customers[customerIndex].phone = "964" + phone;
         data.customers[customerIndex].lastUpdated = Date.now();
         
+        addToQueue('edit', 'customers', data.customers[customerIndex]);
+
         await saveDataLocally();
         window.closeModal('editCustomerModal');
         window.searchCustomer();
@@ -404,7 +464,7 @@ window.renderCustomers = function(searchQuery = '') {
     const list = document.getElementById('customers-list');
     list.innerHTML = '';
     
-    let filteredCustomers = data.customers.filter(c => !c.deleted);
+    let filteredCustomers = data.customers;
     if(searchQuery) {
         filteredCustomers = filteredCustomers.filter(cust => cust.name.toLowerCase().startsWith(searchQuery));
     }
@@ -427,11 +487,8 @@ window.renderCustomers = function(searchQuery = '') {
 
 window.deleteCustomer = async function(id) {
     if(confirm("هل أنت متأكد من حذف هذا الزبون؟")) {
-        const customerIndex = data.customers.findIndex(c => c.id === id);
-        if (customerIndex > -1) {
-            data.customers[customerIndex].deleted = true;
-            data.customers[customerIndex].lastUpdated = Date.now();
-        }
+        data.customers = data.customers.filter(c => c.id !== id);
+        addToQueue('delete', 'customers', { id: id });
         await saveDataLocally();
         window.searchCustomer();
     }
@@ -470,9 +527,11 @@ window.savePayment = async function() {
     const customer = data.customers.find(c => c.id === currentCustomerId);
     customer.balance -= amount;
     customer.lastUpdated = Date.now();
+    
+    addToQueue('edit', 'customers', customer);
 
     const now = new Date();
-    data.transactions.push({
+    const newTrans = {
         id: Date.now(),
         customerId: currentCustomerId,
         type: 'payment',
@@ -480,7 +539,10 @@ window.savePayment = async function() {
         date: now.toLocaleDateString('ar-IQ'),
         time: now.toLocaleTimeString('ar-IQ', { hour: '2-digit', minute: '2-digit', hour12: true }),
         lastUpdated: Date.now()
-    });
+    };
+
+    data.transactions.push(newTrans);
+    addToQueue('add', 'transactions', newTrans);
 
     await saveDataLocally();
     window.closeModal('paymentModal');
@@ -516,7 +578,7 @@ window.openRentModal = function() {
 window.filterRentItems = function(input, rowId) {
     const query = input.value.toLowerCase().trim();
     const dropdown = document.getElementById(`dropdown-${rowId}`);
-    let items = currentRentInventory === 1 ? data.inventory1.filter(i => !i.deleted) : data.inventory2.filter(i => !i.deleted);
+    let items = currentRentInventory === 1 ? data.inventory1 : data.inventory2;
     
     dropdown.innerHTML = '';
     
@@ -591,10 +653,10 @@ window.saveRentalTransaction = async function() {
             const qty = parseInt(qtys[index].value) || 1;
             const price = parseFloat(prices[index].value) || 0;
             
-            let foundItem = data.inventory1.find(i => i.name === itemName && !i.deleted);
+            let foundItem = data.inventory1.find(i => i.name === itemName);
             let invType = 1;
             if(!foundItem) {
-                foundItem = data.inventory2.find(i => i.name === itemName && !i.deleted);
+                foundItem = data.inventory2.find(i => i.name === itemName);
                 invType = 2;
             }
 
@@ -625,17 +687,18 @@ window.saveRentalTransaction = async function() {
     }
 
     itemsArray.forEach(item => {
-        if(item.invType === 1) {
-            let invItem = data.inventory1.find(i => i.id === item.id);
-            if(invItem) { invItem.qty -= item.qty; invItem.lastUpdated = nowTimestamp; }
-        } else {
-            let invItem = data.inventory2.find(i => i.id === item.id);
-            if(invItem) { invItem.qty -= item.qty; invItem.lastUpdated = nowTimestamp; }
+        let collection = item.invType === 1 ? 'inventory1' : 'inventory2';
+        let invItem = data[collection].find(i => i.id === item.id);
+        if(invItem) { 
+            invItem.qty -= item.qty; 
+            invItem.lastUpdated = nowTimestamp; 
+            addToQueue('edit', collection, invItem);
         }
     });
 
     customer.balance -= paid;
     customer.lastUpdated = nowTimestamp;
+    addToQueue('edit', 'customers', customer);
 
     const now = new Date();
     const rawDate = now.toISOString().split('T')[0];
@@ -659,6 +722,8 @@ window.saveRentalTransaction = async function() {
     };
 
     data.transactions.push(transaction);
+    addToQueue('add', 'transactions', transaction);
+
     await saveDataLocally();
     window.closeModal('rentModal');
     window.updateCustomerBalanceDisplay(customer);
@@ -680,12 +745,12 @@ window.deleteTransaction = async function(id) {
                 trans.itemsArray.forEach(item => {
                     const unreturnedQty = item.qty - item.returnedQty;
                     if(unreturnedQty > 0) {
-                        if(item.invType === 1) {
-                            let invItem = data.inventory1.find(i => i.id === item.id);
-                            if(invItem) invItem.qty += unreturnedQty;
-                        } else {
-                            let invItem = data.inventory2.find(i => i.id === item.id);
-                            if(invItem) invItem.qty += unreturnedQty;
+                        let collection = item.invType === 1 ? 'inventory1' : 'inventory2';
+                        let invItem = data[collection].find(i => i.id === item.id);
+                        if(invItem) {
+                            invItem.qty += unreturnedQty;
+                            invItem.lastUpdated = Date.now();
+                            addToQueue('edit', collection, invItem);
                         }
                     }
                 });
@@ -695,8 +760,11 @@ window.deleteTransaction = async function(id) {
         }
         
         customer.lastUpdated = Date.now();
-        trans.deleted = true; 
-        trans.lastUpdated = Date.now();
+        addToQueue('edit', 'customers', customer);
+
+        data.transactions = data.transactions.filter(t => t.id !== id);
+        addToQueue('delete', 'transactions', { id: id });
+
         await saveDataLocally();
         window.updateCustomerBalanceDisplay(customer);
         window.renderTransactions();
@@ -757,6 +825,9 @@ window.saveEditTransaction = async function() {
     
     trans.lastUpdated = Date.now();
     customer.lastUpdated = Date.now();
+
+    addToQueue('edit', 'transactions', trans);
+    addToQueue('edit', 'customers', customer);
 
     await saveDataLocally();
     window.closeModal('editTransactionModal');
@@ -839,12 +910,12 @@ window.processSingleReturn = async function(transId, itemIndex, isCash) {
     const now = new Date();
     const dateStr = now.toLocaleDateString('ar-IQ') + ' ' + now.toLocaleTimeString('ar-IQ', { hour: '2-digit', minute: '2-digit', hour12: true });
 
-    if(item.invType === 1) {
-        let invItem = data.inventory1.find(i => i.id === item.id);
-        if(invItem) invItem.qty += qtyInput;
-    } else {
-        let invItem = data.inventory2.find(i => i.id === item.id);
-        if(invItem) invItem.qty += qtyInput;
+    let collection = item.invType === 1 ? 'inventory1' : 'inventory2';
+    let invItem = data[collection].find(i => i.id === item.id);
+    if(invItem) {
+        invItem.qty += qtyInput;
+        invItem.lastUpdated = Date.now();
+        addToQueue('edit', collection, invItem);
     }
 
     trans.totalCost = (trans.totalCost || 0) + cost;
@@ -872,6 +943,9 @@ window.processSingleReturn = async function(transId, itemIndex, isCash) {
     trans.lastUpdated = Date.now();
     customer.lastUpdated = Date.now();
 
+    addToQueue('edit', 'transactions', trans);
+    addToQueue('edit', 'customers', customer);
+
     await saveDataLocally();
     window.openReturnModal(transId); 
     window.updateCustomerBalanceDisplay(customer);
@@ -883,7 +957,7 @@ window.renderTransactions = function() {
     const list = document.getElementById('transactions-list');
     list.innerHTML = '';
     
-    const custTrans = data.transactions.filter(t => t.customerId === currentCustomerId && !t.deleted).reverse();
+    const custTrans = data.transactions.filter(t => t.customerId === currentCustomerId).reverse();
 
     custTrans.forEach(t => {
         const displayTime = t.time ? t.time : ''; 
@@ -984,7 +1058,7 @@ window.renderAlerts = function() {
     let hasAlerts = false;
 
     data.transactions.forEach(t => {
-        if(!t.deleted && t.type === 'rent' && t.status === 'ongoing' && t.returnDateTimestamp && t.returnDateTimestamp < now) {
+        if(t.type === 'rent' && t.status === 'ongoing' && t.returnDateTimestamp && t.returnDateTimestamp < now) {
             hasAlerts = true;
             const customer = data.customers.find(c => c.id === t.customerId);
             
