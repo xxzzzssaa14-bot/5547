@@ -299,8 +299,12 @@ window.saveEditItem = async function() {
 
 window.deleteItem = async function(id, invNum) {
     if(confirm("هل أنت متأكد من حذف هذه المادة؟")) {
-        if(invNum === 1) data.inventory1 = data.inventory1.filter(item => item.id !== id);
-        else data.inventory2 = data.inventory2.filter(item => item.id !== id);
+        const items = invNum === 1 ? data.inventory1 : data.inventory2;
+        const itemIndex = items.findIndex(i => i.id === id);
+        if (itemIndex > -1) {
+            items[itemIndex].deleted = true;
+            items[itemIndex].lastUpdated = Date.now();
+        }
         await saveDataLocally();
         window.searchInventory();
     }
@@ -309,7 +313,7 @@ window.deleteItem = async function(id, invNum) {
 window.renderInventory = function(searchQuery = '') {
     const list = document.getElementById('inventory-list');
     list.innerHTML = '';
-    let items = currentInventory === 1 ? data.inventory1 : data.inventory2;
+    let items = currentInventory === 1 ? data.inventory1.filter(i => !i.deleted) : data.inventory2.filter(i => !i.deleted);
 
     if (searchQuery) {
         items = items.filter(item => item.name.toLowerCase().startsWith(searchQuery));
@@ -400,7 +404,7 @@ window.renderCustomers = function(searchQuery = '') {
     const list = document.getElementById('customers-list');
     list.innerHTML = '';
     
-    let filteredCustomers = data.customers;
+    let filteredCustomers = data.customers.filter(c => !c.deleted);
     if(searchQuery) {
         filteredCustomers = filteredCustomers.filter(cust => cust.name.toLowerCase().startsWith(searchQuery));
     }
@@ -423,7 +427,11 @@ window.renderCustomers = function(searchQuery = '') {
 
 window.deleteCustomer = async function(id) {
     if(confirm("هل أنت متأكد من حذف هذا الزبون؟")) {
-        data.customers = data.customers.filter(c => c.id !== id);
+        const customerIndex = data.customers.findIndex(c => c.id === id);
+        if (customerIndex > -1) {
+            data.customers[customerIndex].deleted = true;
+            data.customers[customerIndex].lastUpdated = Date.now();
+        }
         await saveDataLocally();
         window.searchCustomer();
     }
@@ -508,7 +516,7 @@ window.openRentModal = function() {
 window.filterRentItems = function(input, rowId) {
     const query = input.value.toLowerCase().trim();
     const dropdown = document.getElementById(`dropdown-${rowId}`);
-    const items = currentRentInventory === 1 ? data.inventory1 : data.inventory2;
+    let items = currentRentInventory === 1 ? data.inventory1.filter(i => !i.deleted) : data.inventory2.filter(i => !i.deleted);
     
     dropdown.innerHTML = '';
     
@@ -583,10 +591,10 @@ window.saveRentalTransaction = async function() {
             const qty = parseInt(qtys[index].value) || 1;
             const price = parseFloat(prices[index].value) || 0;
             
-            let foundItem = data.inventory1.find(i => i.name === itemName);
+            let foundItem = data.inventory1.find(i => i.name === itemName && !i.deleted);
             let invType = 1;
             if(!foundItem) {
-                foundItem = data.inventory2.find(i => i.name === itemName);
+                foundItem = data.inventory2.find(i => i.name === itemName && !i.deleted);
                 invType = 2;
             }
 
@@ -687,7 +695,8 @@ window.deleteTransaction = async function(id) {
         }
         
         customer.lastUpdated = Date.now();
-        data.transactions = data.transactions.filter(t => t.id !== id);
+        trans.deleted = true; 
+        trans.lastUpdated = Date.now();
         await saveDataLocally();
         window.updateCustomerBalanceDisplay(customer);
         window.renderTransactions();
@@ -755,6 +764,12 @@ window.saveEditTransaction = async function() {
     window.renderTransactions();
 }
 
+window.updateReturnCost = function(index, price, days) {
+    const qty = parseInt(document.getElementById(`ret-qty-${index}`).value) || 0;
+    const cost = days * price * qty;
+    document.getElementById(`est-cost-${index}`).innerText = formatIQD(cost);
+}
+
 window.openReturnModal = function(id) {
     document.getElementById('return-trans-id').value = id;
     const trans = data.transactions.find(t => t.id === id);
@@ -772,11 +787,11 @@ window.openReturnModal = function(id) {
                 let html = `
                     <div class="rent-item-row" style="flex-direction:column; align-items:start; gap:5px;">
                         <div style="font-weight:bold;">${item.name} (الكمية الكلية: ${item.qty} | المتبقي للإرجاع: ${pendingQty})</div>
-                        <div style="font-size:12px; color:gray;">الأيام المحسوبة: ${days} يوم | التكلفة التقديرية لهذه المادة: ${formatIQD(estimatedCost)} د.ع</div>
-                        <div style="display:flex; gap:5px; width:100%;">
-                            <input type="number" id="ret-qty-${index}" placeholder="الكمية المرجعة" value="${pendingQty}" min="1" max="${pendingQty}" style="margin-bottom:0; flex:1;">
-                            <input type="number" id="ret-pay-${index}" placeholder="مبلغ التسديد" value="${estimatedCost}" style="margin-bottom:0; flex:1;">
-                            <button class="btn-primary btn-small" onclick="window.processSingleReturn(${id}, ${index})" style="margin-bottom:0;">إرجاع</button>
+                        <div style="font-size:12px; color:gray;">الأيام المحسوبة: ${days} يوم | الإيجار الكلي للكمية المحددة بالأسفل: <span id="est-cost-${index}">${formatIQD(estimatedCost)}</span> د.ع</div>
+                        <div style="display:flex; gap:5px; width:100%; flex-wrap:wrap;">
+                            <input type="number" id="ret-qty-${index}" placeholder="الكمية المرجعة" value="${pendingQty}" min="1" max="${pendingQty}" oninput="window.updateReturnCost(${index}, ${item.price}, ${days})" style="margin-bottom:0; flex:1; min-width:100px;">
+                            <button class="btn-success btn-small" onclick="window.processSingleReturn(${id}, ${index}, true)" style="margin-bottom:0; flex:1; min-width:120px;">إرجاع ودفع نقداً</button>
+                            <button class="btn-warning btn-small" onclick="window.processSingleReturn(${id}, ${index}, false)" style="margin-bottom:0; flex:1; min-width:120px;">إرجاع وآجل (تسجيل بالدين)</button>
                         </div>
                     </div>
                 `;
@@ -794,7 +809,7 @@ window.openReturnModal = function(id) {
         trans.returnHistory.forEach(h => {
             historyContainer.innerHTML += `
                 <div style="background: #f8f9fa; padding: 8px; margin-bottom: 5px; border-radius: 5px; border: 1px solid #e1e8ed; font-size: 13px;">
-                    <strong>${h.itemName}</strong> | تم إرجاع: ${h.qty} | تكلفة المادة: ${formatIQD(h.cost)} | تسديد: ${formatIQD(h.paid)} د.ع | التاريخ: ${h.date}
+                    <strong>${h.itemName}</strong> | تم إرجاع: ${h.qty} | التكلفة: ${formatIQD(h.cost)} | تسديد: ${h.type} | التاريخ: ${h.date}
                 </div>
             `;
         });
@@ -805,20 +820,20 @@ window.openReturnModal = function(id) {
     window.openModal('returnModal');
 }
 
-window.processSingleReturn = async function(transId, itemIndex) {
+window.processSingleReturn = async function(transId, itemIndex, isCash) {
     const trans = data.transactions.find(t => t.id === transId);
     const customer = data.customers.find(c => c.id === trans.customerId);
     const item = trans.itemsArray[itemIndex];
     
     const qtyInput = parseInt(document.getElementById(`ret-qty-${itemIndex}`).value) || 0;
-    const payInput = parseFloat(document.getElementById(`ret-pay-${itemIndex}`).value) || 0;
     
-    if(qtyInput <= 0 || payInput < 0) {
-        alert("القيم غير صالحة"); return;
+    if(qtyInput <= 0 || qtyInput > (item.qty - item.returnedQty)) {
+        alert("الكمية غير صالحة"); return;
     }
 
     const days = Math.max(1, Math.ceil((Date.now() - item.rentTimestamp) / 86400000));
     const cost = days * item.price * qtyInput;
+    const payInput = isCash ? cost : 0;
 
     item.returnedQty += qtyInput;
     const now = new Date();
@@ -843,7 +858,8 @@ window.processSingleReturn = async function(transId, itemIndex) {
         qty: qtyInput,
         cost: cost,
         paid: payInput,
-        date: dateStr
+        date: dateStr,
+        type: isCash ? 'دفع نقدي' : 'آجل (دين)'
     });
 
     const allReturned = trans.itemsArray.every(i => i.returnedQty >= i.qty);
@@ -867,7 +883,7 @@ window.renderTransactions = function() {
     const list = document.getElementById('transactions-list');
     list.innerHTML = '';
     
-    const custTrans = data.transactions.filter(t => t.customerId === currentCustomerId).reverse();
+    const custTrans = data.transactions.filter(t => t.customerId === currentCustomerId && !t.deleted).reverse();
 
     custTrans.forEach(t => {
         const displayTime = t.time ? t.time : ''; 
@@ -887,8 +903,20 @@ window.renderTransactions = function() {
             `;
         } else {
             const itemsDisplay = t.itemsArray ? t.itemsArray.map(i => `${i.name}(${i.qty})`).join(' + ') : t.items;
-            const totalDisplay = t.totalCost || t.total || 0;
-            const remDisplay = t.remaining !== undefined ? t.remaining : (totalDisplay - t.paid);
+            
+            let liveRunningCost = 0;
+            if(t.itemsArray && t.status !== 'completed') {
+                t.itemsArray.forEach(item => {
+                    const pendingQty = item.qty - item.returnedQty;
+                    if(pendingQty > 0) {
+                        const days = Math.max(1, Math.ceil((Date.now() - item.rentTimestamp) / 86400000));
+                        liveRunningCost += days * item.price * pendingQty;
+                    }
+                });
+            }
+            
+            const totalDisplay = (t.totalCost || 0) + liveRunningCost;
+            const remDisplay = totalDisplay - t.paid;
 
             list.innerHTML += `
                 <div class="card" style="border-right: 5px solid #2980b9;">
@@ -925,8 +953,20 @@ window.shareRentWhatsApp = function(transId) {
     const customer = data.customers.find(c => c.id === trans.customerId);
     
     let itemsDisplay = trans.itemsArray ? trans.itemsArray.map(i => `${i.name} (عدد ${i.qty})`).join(', ') : trans.items.replace(/<[^>]*>?/gm, ' ');
-    const totalDisplay = trans.totalCost || trans.total || 0;
-    const remDisplay = trans.remaining !== undefined ? trans.remaining : (totalDisplay - trans.paid);
+    
+    let liveRunningCost = 0;
+    if(trans.itemsArray && trans.status !== 'completed') {
+        trans.itemsArray.forEach(item => {
+            const pendingQty = item.qty - item.returnedQty;
+            if(pendingQty > 0) {
+                const days = Math.max(1, Math.ceil((Date.now() - item.rentTimestamp) / 86400000));
+                liveRunningCost += days * item.price * pendingQty;
+            }
+        });
+    }
+    
+    const totalDisplay = (trans.totalCost || 0) + liveRunningCost;
+    const remDisplay = totalDisplay - trans.paid;
 
     const message = `*محلات كريم لتأجير العدد اليدوية*\n\nمرحباً ${customer.name}،\nتفاصيل التأجير:\nالمواد: ${itemsDisplay}\nالمبلغ المحسوب حتى الآن: ${formatIQD(totalDisplay)} د.ع\nالمدفوع: ${formatIQD(trans.paid)} د.ع\nالمتبقي من هذه الفاتورة: ${formatIQD(remDisplay)} د.ع\n\nإجمالي الباقي بذمتكم: ${formatIQD(customer.balance)} د.ع\n\nشكراً لتعاملكم معنا!`;
     
@@ -944,7 +984,7 @@ window.renderAlerts = function() {
     let hasAlerts = false;
 
     data.transactions.forEach(t => {
-        if(t.type === 'rent' && t.status === 'ongoing' && t.returnDateTimestamp && t.returnDateTimestamp < now) {
+        if(!t.deleted && t.type === 'rent' && t.status === 'ongoing' && t.returnDateTimestamp && t.returnDateTimestamp < now) {
             hasAlerts = true;
             const customer = data.customers.find(c => c.id === t.customerId);
             
